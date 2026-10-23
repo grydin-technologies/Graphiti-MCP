@@ -34,6 +34,33 @@ Graphiti
 
 &nbsp;
 
+---
+
+## GrydIn Technologies deployment
+
+This repository is [GrydIn Technologies](https://github.com/grydin-technologies)' working deployment of Graphiti,
+built around one specific constraint: real persistent memory for AI coding agents, running entirely outside the
+Docker-and-OpenAI path most Graphiti guides assume.
+
+**What's changed from upstream.** The `mcp_server/` package is reconfigured for a local Windows install — Neo4j
+Desktop instead of containerized FalkorDB, Gemini and Voyage AI instead of OpenAI for extraction and embeddings
+(both free-tier), and a `local-reranker` dependency split that keeps `uv sync --extra providers` from silently
+pulling in `torch`/`transformers`, which triggers a multi-minute import stall on Windows for a fallback feature
+most setups never use. Full details, the comparison table against the default path, and the quickstart live in
+[`mcp_server/README.md`](mcp_server/README.md).
+
+**What's new on top of Graphiti.** [`mcp_server/automation/`](mcp_server/automation/README.md) adds a session-start
+hook that keeps a project's graph memory current with zero manual upkeep: it checks whether the codebase changed
+since the last session (via `git HEAD`, not a timer or a full rescan every time) and only re-ingests what actually
+moved — built specifically so a free-tier API key doesn't get exhausted by habit.
+
+**Attribution.** The knowledge-graph engine, MCP protocol implementation, and REST service below are
+[Graphiti](https://github.com/getzep/graphiti) by [Zep](https://www.getzep.com), licensed Apache-2.0 — unmodified
+except where noted above. This fork doesn't change Graphiti's core; it changes how it's deployed and how its
+memory stays in sync with a real codebase.
+
+---
+
 Graphiti is a framework for building and querying temporal context graphs for AI agents. Unlike static knowledge graphs,
 Graphiti's context graphs track how facts change over time, maintain provenance to source data, and support both
 prescribed and learned ontology — making them purpose-built for agents operating on evolving, real-world data.
