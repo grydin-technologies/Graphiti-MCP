@@ -36,28 +36,70 @@ Graphiti
 
 ---
 
-## GrydIn Technologies deployment
+# GrydIn / Graphiti-MCP
 
-This repository is [GrydIn Technologies](https://github.com/grydin-technologies)' working deployment of Graphiti,
-built around one specific constraint: real persistent memory for AI coding agents, running entirely outside the
-Docker-and-OpenAI path most Graphiti guides assume.
+**An AI coding agent forgets your codebase the instant the session ends. This repository exists so it doesn't
+have to.**
 
-**What's changed from upstream.** The `mcp_server/` package is reconfigured for a local Windows install — Neo4j
-Desktop instead of containerized FalkorDB, Gemini and Voyage AI instead of OpenAI for extraction and embeddings
-(both free-tier), and a `local-reranker` dependency split that keeps `uv sync --extra providers` from silently
-pulling in `torch`/`transformers`, which triggers a multi-minute import stall on Windows for a fallback feature
-most setups never use. Full details, the comparison table against the default path, and the quickstart live in
-[`mcp_server/README.md`](mcp_server/README.md).
+Graphiti-MCP wraps the open-source [Graphiti](https://github.com/getzep/graphiti) knowledge-graph engine in a
+deployment built for one job: give any MCP-compatible AI assistant persistent, queryable memory of a specific
+codebase — what it is, how it's structured, what decisions were made and why — without Docker, without a paid
+API tier, and without a human remembering to ask for it every session.
 
-**What's new on top of Graphiti.** [`mcp_server/automation/`](mcp_server/automation/README.md) adds a session-start
-hook that keeps a project's graph memory current with zero manual upkeep: it checks whether the codebase changed
-since the last session (via `git HEAD`, not a timer or a full rescan every time) and only re-ingests what actually
-moved — built specifically so a free-tier API key doesn't get exhausted by habit.
+### Why this exists
 
-**Attribution.** The knowledge-graph engine, MCP protocol implementation, and REST service below are
-[Graphiti](https://github.com/getzep/graphiti) by [Zep](https://www.getzep.com), licensed Apache-2.0 — unmodified
-except where noted above. This fork doesn't change Graphiti's core; it changes how it's deployed and how its
-memory stays in sync with a real codebase.
+Every new AI session starts cold. Context windows hold a conversation; they don't hold a relationship with a
+project. Close the session, lose the thread — the assistant re-reads the same README, re-infers the same
+architecture, re-derives conclusions it already reached yesterday. That's fine once. It's a slow, silent cost
+every time after.
+
+The fix isn't a bigger context window. It's external memory that persists independently of any single
+conversation, updates itself only when something actually changes, and stays cheap enough to run on a free API
+tier indefinitely. That's what this repository configures and automates.
+
+### How it fits together
+
+```
+ ┌──────────────────────┐        MCP protocol        ┌───────────────────────┐
+ │   AI coding agent      │ ◄─────────────────────────► │   Graphiti MCP server  │
+ │  (Claude Code, Claude  │   add_memory / search_*     │  (this repo, mcp_server/)│
+ │   Desktop, any MCP      │                             └───────────┬───────────┘
+ │   client)               │                                         │
+ └──────────┬──────────────┘                                         │
+            │ SessionStart hook                                      │ Bolt protocol
+            │ (automation/graphiti_session_start.py)                 ▼
+            │ — fires automatically, every session —        ┌─────────────────┐
+            │ checks git HEAD, decides: sync or skip         │  Neo4j (local)   │
+            ▼                                                 │  the actual graph │
+   git HEAD unchanged → one cheap lookup                       └─────────────────┘
+   git HEAD changed / first run → scoped re-scan + Successful Ideation
+```
+
+Extraction runs on **Gemini**, embeddings run on **Voyage AI** — both free-tier, chosen specifically because this
+had to work without a billing relationship. The graph itself lives in **Neo4j Desktop**, run directly rather than
+through Docker, so its state is something you can actually see and start by hand when needed.
+
+### What's actually different from stock Graphiti
+
+| Area | Upstream default | This deployment | Why |
+|---|---|---|---|
+| Graph backend | FalkorDB via `docker compose up` | Neo4j Desktop, run directly | No Docker dependency; visible, inspectable local state |
+| LLM provider | OpenAI | Gemini | Free-tier; no billing requirement |
+| Embedding provider | OpenAI | Voyage AI | Free-tier; OpenAI's embeddings aren't free, Groq has no embeddings API at all |
+| Memory sync | Manual `add_memory` calls, triggered by the assistant deciding to | Automatic `SessionStart` hook, every session, zero manual trigger | A memory system nobody remembers to use doesn't get used |
+| Rescan trigger | None — re-ingestion is whatever you ask for | `git HEAD` diff check; unchanged code = one cheap lookup, not a re-ingest | Free-tier quota doesn't survive a full rescan on every session |
+| `providers` extra | Bundles `sentence-transformers` (→ `torch`, `transformers`) | Split into a separate `local-reranker` extra | `transformers`' first-import filesystem scan stalls 90s–2.5min on Windows, for a fallback reranker this setup never uses |
+
+Full install walkthrough, the dependency-split rationale in detail, and the troubleshooting notes live in
+[`mcp_server/README.md`](mcp_server/README.md). The automation hook's exact decision logic is documented in
+[`mcp_server/automation/README.md`](mcp_server/automation/README.md).
+
+### Attribution
+
+The knowledge-graph engine, MCP protocol implementation, and REST service that follow in this README are
+[Graphiti](https://github.com/getzep/graphiti), built by [Zep](https://www.getzep.com) and licensed Apache-2.0.
+Graphiti's core is unmodified here — this repository changes how it's deployed, configured, and kept in sync with
+a real, evolving codebase, not the engine itself. Full upstream documentation continues below.
 
 ---
 

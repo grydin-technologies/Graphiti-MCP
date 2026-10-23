@@ -11,48 +11,126 @@ This is an experimental Model Context Protocol (MCP) server implementation for G
 Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge
 graph capabilities.
 
-## Graphiti-MCP: a no-Docker, free-tier deployment
+## Graphiti-MCP deployment guide
 
-This repository packages Graphiti's MCP server for a specific, deliberately constrained target: a local Windows
-machine, no Docker, no paid API tier, memory that stays in sync with a codebase on its own. It exists because the
-default install path assumes Docker and an OpenAI budget, and plenty of setups have neither.
+This section documents a specific, deliberately constrained deployment target for the MCP server above: a local
+Windows machine, no Docker, no paid API tier, and memory that stays synchronized with a codebase without a human
+re-triggering it. Everything below is scoped to that target — for the general-purpose server documentation, skip
+ahead to [Features](#features).
 
-### What's different here
+**Contents:** [Design goals](#design-goals) · [Prerequisites](#prerequisites) · [Installation](#installation) ·
+[Configuration reference](#configuration-reference) · [Verifying the install](#verifying-the-install) ·
+[Automated memory sync](#automated-memory-sync) · [Known issues](#known-issues) ·
+[Provider decisions](#provider-decisions) · [Operating costs](#operating-costs) · [Non-goals](#non-goals)
 
-| Default path | This deployment |
-|---|---|
-| FalkorDB via `docker compose up` | Neo4j Desktop, installed and run directly |
-| OpenAI for extraction + embeddings | Gemini (extraction) + Voyage AI (embeddings), both free-tier |
-| Manual `add_memory` calls per session | [`automation/graphiti_session_start.py`](automation/graphiti_session_start.py) — a Claude Code hook that syncs memory on every session start, with no manual trigger |
-| Full codebase rescan whenever invoked | Rescans gated on `git HEAD` change — unchanged code means a single cheap lookup, not a re-ingest |
+### Design goals
 
-### Quickstart (Windows, no Docker)
+1. **No Docker.** Every dependency runs as a native process you can see, start, and stop directly — no compose
+   file standing between you and the actual state of the system.
+2. **No billing relationship required.** Every external API call this deployment makes goes to a free tier.
+3. **Memory that updates itself.** A knowledge graph that only grows when someone remembers to call `add_memory`
+   isn't really memory — it's a manual chore with extra steps. Sync has to be automatic to be worth having.
+4. **Bounded cost under automation.** Automatic doesn't mean unthrottled — free-tier keys have real rate and
+   quota limits, so the automation has to know when *not* to act, not just when to act.
 
-1. Install [Neo4j Desktop](https://neo4j.com/download/) and start a local instance on the default `bolt://localhost:7687`.
-2. `uv sync --extra providers` inside `mcp_server/` — deliberately does **not** pull in `torch`/`transformers`; see the gotcha below.
-3. Copy `.env.example` to `.env` and fill in `NEO4J_PASSWORD`, `GOOGLE_API_KEY` (Gemini), and `VOYAGE_API_KEY`. Both API keys are free-tier.
-4. `config/config.yaml` is already set to `llm.provider: gemini`, `embedder.provider: voyage`, `database.provider: neo4j` — no further edits needed for this path.
-5. Verify: `uv run main.py --transport stdio` should print a clean startup log within ~20 seconds, not hang.
-6. Optional: wire up [`automation/graphiti_session_start.py`](automation/README.md) so the graph updates itself per project, per session, without you remembering to ask.
+### Prerequisites
 
-### The gotcha worth knowing about before you hit it
+| Requirement | Why | Get it |
+|---|---|---|
+| Python 3.10+ | Server runtime | [python.org](https://www.python.org/downloads/) |
+| `uv` | Dependency management, used instead of raw `pip` throughout | [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
+| Neo4j Desktop | Graph storage backend | [neo4j.com/download](https://neo4j.com/download/) |
+| Google AI Studio API key | Gemini — LLM extraction | [aistudio.google.com](https://aistudio.google.com/) |
+| Voyage AI API key | Embeddings | [dash.voyageai.com](https://dash.voyageai.com/) |
+| Git | Required by the automation hook's `git HEAD` drift check | usually already present |
 
-The `providers` optional-dependency group originally bundled `sentence-transformers` in with `google-genai`,
-`anthropic`, `groq`, and `voyageai`. On Windows, importing `sentence-transformers` transitively pulls in
-`transformers`, which builds a lazy-import map of its own several-hundred-module package tree on first load by
-walking the filesystem — this took 90 seconds to 2.5 minutes here, with zero stdout/stderr output in the
-meantime, which is indistinguishable from a genuine deadlock unless you bisect the import chain to find it.
+### Installation
 
-`sentence-transformers` is only there as a local fallback reranker for setups with no API-based reranker
-configured — Gemini already covers that role natively here, so the dependency was pure dead weight. It's now
-split into its own `local-reranker` extra (see `pyproject.toml`); `uv sync --extra providers` stays fast by
-default, and you opt into the heavy fallback only if your provider combination actually needs it (e.g. Anthropic
-LLM + Voyage embedder, with no Gemini or OpenAI key configured for reranking).
+1. Clone this repository and `cd mcp_server`.
+2. Install Neo4j Desktop, create a local database instance, and start it. Default connection is
+   `bolt://localhost:7687` — no further Neo4j-side configuration is needed for this deployment.
+3. Run `uv sync --extra providers`. This installs `google-genai`, `voyageai`, `anthropic`, and `groq` client
+   libraries, but **not** `sentence-transformers`/`torch` — see [Known issues](#known-issues) for why that split
+   exists and matters.
+4. Copy `.env.example` to `.env` and fill in three values: `NEO4J_PASSWORD` (whatever you set in Neo4j Desktop),
+   `GOOGLE_API_KEY`, and `VOYAGE_API_KEY`. Never commit this file — it's already covered by `.gitignore`.
+5. `config/config.yaml` ships pre-set for this path (`llm.provider: gemini`, `embedder.provider: voyage`,
+   `database.provider: neo4j`) — no edits required unless you're changing providers.
 
-### Why Groq isn't in the provider mix
+### Configuration reference
 
-Groq covers chat completion but ships no embeddings API, so it can't stand in for the embedder role on its own —
-ruled out early rather than discovered mid-setup.
+| `config.yaml` key | This deployment's value | Alternatives |
+|---|---|---|
+| `llm.provider` | `gemini` | `openai`, `anthropic`, `azure_openai`, `groq` |
+| `llm.model` | `gemini-2.0-flash` | any Gemini model, env-overridable via `MODEL_NAME` |
+| `embedder.provider` | `voyage` | `openai`, `azure_openai`, `gemini` |
+| `embedder.dimensions` | `1024` | provider-dependent |
+| `database.provider` | `neo4j` | `falkordb` (default upstream, needs Docker or a local Redis-compatible instance) |
+| `graphiti.group_id` | per-project, set at the automation layer, not here | — |
+
+### Verifying the install
+
+```bash
+uv run main.py --transport stdio
+```
+
+A healthy start prints a clean log within roughly 20 seconds and does not hang. If Neo4j isn't running yet,
+you'll see connection-retry warnings (expected, not an error) rather than silence — start the Neo4j Desktop
+instance and retry.
+
+### Automated memory sync
+
+[`automation/graphiti_session_start.py`](automation/README.md) is a Claude Code `SessionStart` hook — it runs on
+every session start, resume, and clear, in every project, with no manual step to invoke it. On each trigger it:
+
+- Confirms Neo4j is reachable before doing anything else.
+- Computes a `group_id` from the project folder so each project's memory stays logically separate inside the one
+  graph.
+- Compares the project's current `git HEAD` against the last commit it saw. Unchanged code triggers one cheap
+  memory lookup; changed code (or a first-ever run) triggers a scoped re-scan and an updated `add_memory` call,
+  then prints `Successful Ideation` on success.
+
+Full decision logic and setup instructions are in [`automation/README.md`](automation/README.md).
+
+### Known issues
+
+**The `sentence-transformers` import stall (Windows).** The upstream `providers` extra used to bundle
+`sentence-transformers` alongside `google-genai`, `anthropic`, `groq`, and `voyageai`. Importing
+`sentence-transformers` transitively imports `transformers`, which builds a lazy-import map of its own
+several-hundred-module tree on first load by walking the filesystem — on Windows this took 90 seconds to 2.5
+minutes locally, with zero stdout/stderr output in the meantime, indistinguishable from a hang without bisecting
+the import chain. `sentence-transformers` only backs a local fallback reranker used when no configured
+LLM/embedder provider has a native one — Gemini already covers reranking here, so the dependency was dead weight.
+**Fix applied:** split into its own `local-reranker` extra in `pyproject.toml`. `uv sync --extra providers` stays
+fast; opt into `--extra local-reranker` only if your provider combination genuinely needs the fallback (e.g.
+Anthropic LLM + Voyage embedder, no Gemini/OpenAI key for reranking).
+
+**Neo4j doesn't auto-start.** Unlike a Dockerized FalkorDB container, Neo4j Desktop requires manually starting the
+instance after a reboot. The automation hook detects this (connection check before anything else) and tells the
+assistant to skip Graphiti for that session rather than failing loudly.
+
+### Provider decisions
+
+- **Gemini over OpenAI:** free tier, no billing relationship required for this deployment's scope.
+- **Voyage AI over OpenAI embeddings:** same reasoning — free tier covers this use case's volume.
+- **Groq excluded entirely:** covers chat completion but ships no embeddings API, so it can't fill the embedder
+  role on its own — ruled out at the design stage rather than discovered mid-setup.
+- **Neo4j over FalkorDB:** FalkorDB's simplest path is a Docker container; Neo4j Desktop gives a native,
+  inspectable local process instead, matching the no-Docker goal.
+
+### Operating costs
+
+Both Gemini and Voyage AI's free tiers have per-minute and per-day request caps. The automation layer's `git
+HEAD` gating exists specifically to keep usage inside those caps under normal day-to-day use — an unchanged
+project costs one lightweight lookup per session, not a full re-ingestion. Projects with very large, frequently
+changing codebases may still want to tune `SEMAPHORE_LIMIT` down in `.env` to stay comfortably under rate limits.
+
+### Non-goals
+
+This deployment does not attempt to: support every MCP client automatically (the `SessionStart` hook is Claude
+Code-specific; other MCP clients can reach the same server but need their own trigger mechanism), run at scale
+for multiple concurrent users (it's a local, single-developer memory layer), or replace proper documentation —
+it's a supplement for the gap between "what the code does" and "why it does it," not a substitute for either.
 
 ## Features
 
