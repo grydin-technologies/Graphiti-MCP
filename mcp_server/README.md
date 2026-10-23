@@ -11,25 +11,48 @@ This is an experimental Model Context Protocol (MCP) server implementation for G
 Graphiti's key functionality through the MCP protocol, allowing AI assistants to interact with Graphiti's knowledge
 graph capabilities.
 
-## This fork: palimpsest
+## Graphiti-MCP: a no-Docker, free-tier deployment
 
-This fork documents a no-Docker, Windows, free-tier setup, plus an automation layer that keeps the graph in sync
-with a codebase without manual intervention. See [`automation/README.md`](automation/README.md) for the
-session-start hook, and the notes below for the two issues most likely to bite anyone replicating this on Windows.
+This repository packages Graphiti's MCP server for a specific, deliberately constrained target: a local Windows
+machine, no Docker, no paid API tier, memory that stays in sync with a codebase on its own. It exists because the
+default install path assumes Docker and an OpenAI budget, and plenty of setups have neither.
 
-**Provider setup.** Configured for Gemini (LLM extraction) + Voyage AI (embeddings), both free-tier, with Neo4j
-Desktop as the graph backend instead of the default FalkorDB/Docker path. Groq was considered and ruled out — it
-has no embeddings API, so it can't cover the embedder role on its own.
+### What's different here
 
-**The `sentence-transformers` trap.** The `providers` optional-dependency group used to bundle
-`sentence-transformers` alongside `google-genai`, `anthropic`, `groq`, and `voyageai`. On Windows, importing
-`sentence-transformers` transitively pulls in `transformers`, which builds a lazy-import map of its own module
-tree on first load by walking the filesystem — this took 90 seconds to 2.5 minutes locally, with zero output,
-indistinguishable from a genuine hang unless you bisect the import chain. `sentence-transformers` is only used as
-a local fallback reranker when no configured LLM/embedder provider has a native one (e.g. Anthropic + Voyage with
-no OpenAI/Gemini key) — most setups, including this one with Gemini configured, never touch that path. It's now
-split into its own `local-reranker` extra (see `pyproject.toml`), so `uv sync --extra providers` stays fast by
-default and you opt into the heavy fallback only if you actually need it.
+| Default path | This deployment |
+|---|---|
+| FalkorDB via `docker compose up` | Neo4j Desktop, installed and run directly |
+| OpenAI for extraction + embeddings | Gemini (extraction) + Voyage AI (embeddings), both free-tier |
+| Manual `add_memory` calls per session | [`automation/graphiti_session_start.py`](automation/graphiti_session_start.py) — a Claude Code hook that syncs memory on every session start, with no manual trigger |
+| Full codebase rescan whenever invoked | Rescans gated on `git HEAD` change — unchanged code means a single cheap lookup, not a re-ingest |
+
+### Quickstart (Windows, no Docker)
+
+1. Install [Neo4j Desktop](https://neo4j.com/download/) and start a local instance on the default `bolt://localhost:7687`.
+2. `uv sync --extra providers` inside `mcp_server/` — deliberately does **not** pull in `torch`/`transformers`; see the gotcha below.
+3. Copy `.env.example` to `.env` and fill in `NEO4J_PASSWORD`, `GOOGLE_API_KEY` (Gemini), and `VOYAGE_API_KEY`. Both API keys are free-tier.
+4. `config/config.yaml` is already set to `llm.provider: gemini`, `embedder.provider: voyage`, `database.provider: neo4j` — no further edits needed for this path.
+5. Verify: `uv run main.py --transport stdio` should print a clean startup log within ~20 seconds, not hang.
+6. Optional: wire up [`automation/graphiti_session_start.py`](automation/README.md) so the graph updates itself per project, per session, without you remembering to ask.
+
+### The gotcha worth knowing about before you hit it
+
+The `providers` optional-dependency group originally bundled `sentence-transformers` in with `google-genai`,
+`anthropic`, `groq`, and `voyageai`. On Windows, importing `sentence-transformers` transitively pulls in
+`transformers`, which builds a lazy-import map of its own several-hundred-module package tree on first load by
+walking the filesystem — this took 90 seconds to 2.5 minutes here, with zero stdout/stderr output in the
+meantime, which is indistinguishable from a genuine deadlock unless you bisect the import chain to find it.
+
+`sentence-transformers` is only there as a local fallback reranker for setups with no API-based reranker
+configured — Gemini already covers that role natively here, so the dependency was pure dead weight. It's now
+split into its own `local-reranker` extra (see `pyproject.toml`); `uv sync --extra providers` stays fast by
+default, and you opt into the heavy fallback only if your provider combination actually needs it (e.g. Anthropic
+LLM + Voyage embedder, with no Gemini or OpenAI key configured for reranking).
+
+### Why Groq isn't in the provider mix
+
+Groq covers chat completion but ships no embeddings API, so it can't stand in for the embedder role on its own —
+ruled out early rather than discovered mid-setup.
 
 ## Features
 
