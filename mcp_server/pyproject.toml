@@ -10,7 +10,7 @@ dependencies = [
     "graphiti-core[falkordb]>=0.30.2",
     "pydantic-settings>=2.0.0",
     "pyyaml>=6.0.3",
-    "typing-extensions>=4.0.0",
+    "typing-extensions>=4.16.0",
 ]
 
 [project.optional-dependencies]
