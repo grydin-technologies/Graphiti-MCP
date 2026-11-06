@@ -20,7 +20,7 @@ azure = [
 providers = [
     "google-genai>=2.8.0",
     "anthropic>=0.107.1",
-    "groq>=1.2.0",
+    "groq>=1.7.0",
     "voyageai>=0.3.7",
 ]
 # Local BGE cross-encoder fallback, only needed when no LLM/embedder provider
